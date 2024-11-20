@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>thePirates-Webb</title>
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+    <script type="module">
+      // Import the functions you need from the SDKs you need
+      import Fuse from 'https://cdn.jsdelivr.net/npm/fuse.js@6.4.6/dist/fuse.esm.js';
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
+      import { getFirestore, collection, getDoc, getDocs, setDoc, updateDoc, arrayUnion, arrayRemove, deleteDoc, doc, onSnapshot, Timestamp, query } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
+
+      const servers = {
+        iceServers: [
+          { urls: "stun:stun.relay.metered.ca:80" },
+          { urls: "turn:a.relay.metered.ca:80", username: "a96bdfd48c731dfaa621450e", credential: "RRhbtKq5qXc9ig6N" },
+          { urls: "turn:a.relay.metered.ca:80?transport=tcp", username: "a96bdfd48c731dfaa621450e", credential: "RRhbtKq5qXc9ig6N" },
+          { urls: "turn:a.relay.metered.ca:443", username: "a96bdfd48c731dfaa621450e", credential: "RRhbtKq5qXc9ig6N" },
+          { urls: "turn:a.relay.metered.ca:443?transport=tcp", username: "a96bdfd48c731dfaa621450e", credential: "RRhbtKq5qXc9ig6N" },
+        ],
+        iceCandidatePoolSize: 10,
+      };
+
+      // Your web app's Firebase configuration
+      const firebaseConfig = {
+          apiKey: "AIzaSyCelzirIYPD1YQmNgLmcDa82OdnuU0oqFA",
+          authDomain: "thepirates-web.firebaseapp.com",
+          projectId: "thepirates-web",
+          storageBucket: "thepirates-web.firebasestorage.app",
+          messagingSenderId: "14020978710",
+          appId: "1:14020978710:web:97fd2e730201b5a682ed37",
+          measurementId: "G-ZPCJCX2SLF"
+      };
+      // Initialize Firebase
+      const app = initializeApp(firebaseConfig);
+      const db = getFirestore(app);
+
+      let currentlyShowing = 'search';
+      let searchString = '';
+      let checkedOptions = {all: true};
+      let status = 'none';
+
+      let webTorrentID = '';
+      let messageInput = '';
+      let dataChannel = null;
+      let messages = 'Messages:';
+
+      let file = null;
+      let fileName = '';
+      let receivedChunks = [];
+      let totalSize = 0;
+      let expectedFileSize = null;
+
+      function concatenateArrayBuffers(arrayBuffers) {
+          let totalLength = 0;
+          for (let i = 0; i < arrayBuffers.length; i++) {
+              totalLength += arrayBuffers[i].byteLength;
+          }
+
+          let concatenated = new ArrayBuffer(totalLength);
+          let view = new Uint8Array(concatenated);
+          let offset = 0;
+
+          for (let i = 0; i < arrayBuffers.length; i++) {
+              view.set(new Uint8Array(arrayBuffers[i]), offset);
+              offset += arrayBuffers[i].byteLength;
+          }
+
+          return concatenated;
+      }
+
+      window.showDiv = (name) => {
+        // Hide current div
+        const currentDiv = document.getElementById(currentlyShowing);
+        currentDiv.classList.remove('visible');
+        currentDiv.classList.add('hidden');
+
+        currentlyShowing = name;
+
+        // Show new div
+        const selectedDiv = document.getElementById(name);
+        selectedDiv.classList.remove('hidden');
+        selectedDiv.classList.add('visible');
+      }
+
+      const displayWebTorrents = (torrents, resultsDiv) => {
+        // Detect if the device is mobile
+        const isMobile = window.innerWidth <= 768;
+
+        if (isMobile) {
+            // Mobile view
+            resultsDiv.innerHTML = `
+                <div id="mobile-results"></div>
+                <div class="back-button-container">
+                    <a href="javascript:void(0);" onclick="showDiv('search')" class="btn btn-primary">Back</a>
+                </div>`;
+            
+            const mobileResultsDiv = resultsDiv.querySelector('#mobile-results');
+
+            if (torrents.length === 0) {
+                mobileResultsDiv.innerHTML = `
+                    <p>Arrrg! No results here.</p>
+                    <div class="back-button-container">
+                        <a href="javascript:void(0);" onclick="showDiv('search')" class="btn btn-primary">Back</a>
+                    </div>`;
+            } else {
+                torrents.forEach(async (data) => {
+                    const docRef = doc(db, 'web-torrents', data.id);
+                    const docSnapshot = await getDoc(docRef);
+                    const docData = docSnapshot.data();
+
+                    const div = document.createElement('div');
+                    div.classList.add('mobile-result');
+                    div.innerHTML = `
+                        <h4>${docData.name}</h4>
+                        <p><strong>Category:</strong> ${docData.category}</p>
+                        <p><strong>File Name:</strong> ${docData.fileName}</p>
+                        <p><strong>File Size:</strong> ${docData.fileSize} bytes</p>
+                        <p><strong>Timestamp:</strong> ${docData.timestamp.toDate().toLocaleString()}</p>
+                    `;
+                    div.onclick = () => LeechWebTorrent(data.id);
+                    mobileResultsDiv.appendChild(div);
+                });
+            }
+        } else {
+            // Desktop view
+            resultsDiv.innerHTML = `
+                <table class="table table-striped table-hover text-left">
+                    <thead class="thead-dark">
+                        <tr>
+                            <th>Category</th>
+                            <th>Name</th>
+                            <th>File Name</th>
+                            <th>File Size</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+                <div class="back-button-container">
+                    <a href="javascript:void(0);" onclick="showDiv('search')" class="btn btn-primary">Back</a>
+                </div>`;
+            
+            const tbody = resultsDiv.querySelector('tbody');
+
+            if (torrents.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5">Arrrg! No results here.</td></tr>`;
+            } else {
+                torrents.forEach(async (data) => {
+                    const docRef = doc(db, 'web-torrents', data.id);
+                    const docSnapshot = await getDoc(docRef);
+                    const docData = docSnapshot.data();
+
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${docData.category}</td>
+                        <td>${docData.name}</td>
+                        <td>${docData.fileName}</td>
+                        <td>${docData.fileSize} bytes</td>
+                        <td>${docData.timestamp.toDate().toLocaleString()}</td>`;
+                    tr.onclick = () => LeechWebTorrent(data.id);
+                    tbody.appendChild(tr);
+                });
+            }
+        }
+      };
+
+      window.recentWebTorrents = async () => {
+        const searchRef = doc(db, 'web-torrents-search', 'Search');
+        const searchSnapshot = await getDoc(searchRef);
+        const searchResults = searchSnapshot.data().webTorrentSearch;
+
+        // Get the last 100 torrents from the array or all if there are fewer than 100
+        const recentTorrents = searchResults.slice(-100);
+
+        const resultsDiv = document.getElementById('results');
+        displayWebTorrents(recentTorrents, resultsDiv);
+
+        showDiv('results');
+      };
+
+      window.searchWebTorrents = async () => {
+        const searchInputBox = document.getElementById('searchInputBox').value;
+        const searchRef = doc(db, 'web-torrents-search', 'Search');
+        const searchSnapshot = await getDoc(searchRef);
+        const searchResults = searchSnapshot.data().webTorrentSearch;
+
+        const fuse = new Fuse(searchResults, {
+            keys: ['title']
+        });
+
+        const results = fuse.search(searchInputBox).map(result => result.item);
+        const resultsDiv = document.getElementById('results');
+        displayWebTorrents(results, resultsDiv);
+
+        showDiv('results');
+      };
+
+      window.sendMessage = () => {
+        if (dataChannel) {
+          dataChannel.send(messageInput);
+        }
+      };
+
+      window.sendFile = () => {
+        const reader = new FileReader();
+
+        reader.onload = (e) => {
+          const arrayBuffer = e.target.result;
+          const chunkSize = 16384; // 16KB chunks
+
+          // Send the file size and name first (as a metadata message)
+          const metadata = JSON.stringify({ type: 'meta', size: file.size, name: file.name });
+          dataChannel.send(metadata);
+
+          // Send the file chunks
+          for (let i = 0; i < arrayBuffer.byteLength; i += chunkSize) {
+            dataChannel.send(arrayBuffer.slice(i, i + chunkSize));
+          }
+
+          // Send an end message to signal completion
+          dataChannel.send(JSON.stringify({ type: 'end' }));
+        };
+
+        reader.readAsArrayBuffer(file);
+      };
+
+      window.SeedWebTorrent = async () => {
+        const nameInput = document.getElementById('nameInput').value;
+        const categoryDropdown = document.getElementById('categoryDropdown').value;
+        const fileInput = document.getElementById('fileInput');
+        const file = fileInput.files[0];
+
+        status = 'seeding';
+
+        if (!file) {
+            alert('Please choose a file to upload.');
+            return;
+        }
+
+        const timestamp = Timestamp.now();
+        const docRef = doc(collection(db, 'web-torrents'));
+        const docId = docRef.id;
+        webTorrentID = docId;
+        const searchRef = doc(db, 'web-torrents-search', 'Search');
+
+        await setDoc(docRef, {
+            name: nameInput,
+            category: categoryDropdown,
+            fileName: file.name,
+            fileSize: file.size,
+            timestamp: timestamp,
+        });
+
+        const searchSnapshot = await getDoc(searchRef);
+        if (searchSnapshot.exists()) {
+            await updateDoc(searchRef, {
+                webTorrentSearch: arrayUnion({ title: nameInput, id: docId })
+            });
+        } else {
+            await setDoc(searchRef, {
+                webTorrentSearch: [{ title: nameInput, id: docId }]
+            });
+        }
+
+        console.log('File information and search data submitted to Firestore:', {
+            name: nameInput,
+            category: categoryDropdown,
+            fileName: file.name,
+            fileSize: file.size,
+            timestamp: timestamp,
+        });
+
+        showDiv('transfer');
+
+        // WebRTC setup
+        const pc = new RTCPeerConnection(servers);
+
+        const channel = pc.createDataChannel("chat", { negotiated: true, id: 0 });
+        dataChannel = channel;
+
+        channel.onopen = () => {
+            console.log('Data channel is open');
+            console.log('Sending File');
+            window.sendFile();
+        };
+
+        dataChannel.onmessage = (event) => {
+            const data = event.data;
+
+            if (typeof data === 'string') {
+                try {
+                    const message = JSON.parse(data);
+
+                    if (message.type === 'meta') {
+                        // Initialize to receive file data
+                        window.receivedChunks = [];
+                        window.fileSize = message.size;
+                        window.fileName = message.name;
+                        console.log(`Receiving file: ${window.fileName}, Size: ${window.fileSize} bytes`);
+                    } else if (message.type === 'end') {
+                        // Assemble the file when end message is received
+                        const fullArrayBuffer = concatenateArrayBuffers(window.receivedChunks);
+                        const blob = new Blob([fullArrayBuffer]);
+                        const url = URL.createObjectURL(blob);
+                        const downloadLink = document.createElement('a');
+                        downloadLink.href = url;
+                        downloadLink.download = window.fileName;
+                        downloadLink.innerText = 'Download ' + window.fileName;
+                        document.getElementById('files').appendChild(document.createElement('br'));
+                        document.getElementById('files').appendChild(downloadLink);
+
+                        // Reset state for future file transfers
+                        window.receivedChunks = [];
+                        window.fileSize = 0;
+                        window.fileName = '';
+                    }
+                } catch (error) {
+                    // If parsing fails, it's a normal string message
+                    console.error('Error parsing JSON message:', error);
+                    console.log('Received message:', data);
+                    messages += `\n${data}`;
+                    document.getElementById('messages').innerText = messages;
+                }
+            } else if (data instanceof ArrayBuffer) {
+                // Receive file chunks
+                window.receivedChunks.push(data);
+                const receivedBytes = window.receivedChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+                console.log(`Received ${receivedBytes} of ${window.fileSize} bytes`);
+            } else {
+                // Handle other types of messages if any
+                console.log('Received unknown type of message:', data);
+            }
+        };
+
+        channel.onclose = () => {
+            console.log('Data channel is closed, leecher disconnected');
+        };
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                console.log("Offer ICE candidate generated: ", event.candidate);
+                const iceCandidate = {
+                    candidate: event.candidate.candidate,
+                    sdpMid: event.candidate.sdpMid,
+                    sdpMLineIndex: event.candidate.sdpMLineIndex
+                };
+                const offerCandidatesRef = collection(docRef, 'offerCandidates');
+                const newCandidateDoc = doc(offerCandidatesRef);
+                setDoc(newCandidateDoc, iceCandidate);
+            }
+        };
+
+        const offerDescription = await pc.createOffer();
+        await pc.setLocalDescription(offerDescription);
+
+        await updateDoc(docRef, {
+            offer: { sdp: offerDescription.sdp, type: offerDescription.type }
+        });
+
+        const answerCandidatesRef = collection(docRef, 'answerCandidates');
+
+        onSnapshot(docRef, (snapshot) => {
+            const data = snapshot.data();
+            const answer = data ? data.answer : null;
+            if (answer) {
+                pc.setRemoteDescription(new RTCSessionDescription(answer))
+                    .then(() => {
+                        console.log('Remote Description Set Successfully');
+                    })
+                    .catch((error) => {
+                        console.error('Error setting remote description:', error);
+                    });
+            }
+        });
+
+        // Listen for remote ICE candidates
+        onSnapshot(answerCandidatesRef, (snapshot) => {
+            snapshot.docChanges().forEach((change) => {
+                if (change.type === 'added') {
+                    const candidate = change.doc.data();
+                    pc.addIceCandidate(new RTCIceCandidate(candidate))
+                        .then(() => {
+                            console.log('Answer ICE candidate added successfully');
+                        })
+                        .catch((error) => {
+                            console.error('Error adding answer ICE candidate:', error);
+                        });
+                }
+            });
+        });
+      };
+
+      window.LeechWebTorrent = async (ID) => {
+        webTorrentID = ID;
+        showDiv('transfer');
+
+        status = 'leeching';
+
+        const pc = new RTCPeerConnection(servers);
+
+        const channel = pc.createDataChannel("chat", { negotiated: true, id: 0 });
+        dataChannel = channel;
+
+        channel.onopen = () => {
+          console.log('Data channel is open');
+        };
+
+        dataChannel.onmessage = (event) => {
+          const data = event.data;
+
+          if (typeof data === 'string') {
+            try {
+              const message = JSON.parse(data);
+
+              if (message.type === 'meta') {
+                // Initialize to receive file data
+                window.receivedChunks = [];
+                window.fileSize = message.size;
+                window.fileName = message.name;
+                console.log(`Receiving file: ${window.fileName}, Size: ${window.fileSize} bytes`);
+              } else if (message.type === 'end') {
+                // Assemble the file when end message is received
+                const fullArrayBuffer = concatenateArrayBuffers(window.receivedChunks);
+                const blob = new Blob([fullArrayBuffer]);
+                const url = URL.createObjectURL(blob);
+                const downloadLink = document.createElement('a');
+                downloadLink.href = url;
+                downloadLink.download = window.fileName;
+                downloadLink.innerText = 'Download ' + window.fileName;
+                document.getElementById('files').appendChild(document.createElement('br'));
+                document.getElementById('files').appendChild(downloadLink);
+
+                // Reset state for future file transfers
+                window.receivedChunks = [];
+                window.fileSize = 0;
+                window.fileName = '';
+              }
+            } catch (error) {
+              // If parsing fails, it's a normal string message
+              console.error('Error parsing JSON message:', error);
+              console.log('Received message:', data);
+              messages += `\n${data}`;
+              document.getElementById('messages').innerText = messages;
+            }
+          } else if (data instanceof ArrayBuffer) {
+            // Receive file chunks
+            window.receivedChunks.push(data);
+            const receivedBytes = window.receivedChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+            console.log(`Received ${receivedBytes} of ${window.fileSize} bytes`);
+          } else {
+            // Handle other types of messages if any
+            console.log('Received unknown type of message:', data);
+          }
+        };
+
+        channel.onclose = () => {
+          console.log('Data channel is closed, seeder left');
+          showDiv("search");
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            console.log("Answer ICE candidate generated: ", event.candidate);
+            const iceCandidate = {
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            };
+            const callDocRef = doc(db, 'web-torrents', webTorrentID);
+            const answerCandidatesRef = collection(callDocRef, 'answerCandidates');
+            const newCandidateDoc = doc(answerCandidatesRef); // Auto-generates a unique ID
+            setDoc(newCandidateDoc, iceCandidate);
+          }
+        };
+
+        const callDocRef = doc(db, 'web-torrents', webTorrentID);
+        const callDoc = await getDoc(callDocRef);
+        const data = callDoc.data();
+        const offer = data ? data.offer : null;
+
+        if (offer) {
+          pc.setRemoteDescription(new RTCSessionDescription(offer))
+            .then(() => {
+              console.log('Remote Description Set Successfully');
+            })
+            .catch((error) => {
+              console.error('Error setting remote description:', error);
+            });
+
+          const answerDescription = await pc.createAnswer();
+          await pc.setLocalDescription(answerDescription);
+
+          await updateDoc(callDocRef, { answer: { sdp: answerDescription.sdp, type: answerDescription.type } });
+
+          const offerCandidatesRef = collection(callDocRef, 'offerCandidates');
+
+          // Add existing offer ICE candidates
+          onSnapshot(offerCandidatesRef, (snapshot) => {
+            snapshot.docChanges().forEach((change) => {
+              if (change.type === 'added') {
+                const candidate = change.doc.data();
+                pc.addIceCandidate(new RTCIceCandidate(candidate))
+                  .then(() => {
+                    console.log('Offer ICE candidate added successfully');
+                  })
+                  .catch((error) => {
+                    console.error('Error adding offer ICE candidate:', error);
+                  });
+              }
+            });
+          });
+        }
+      };
+
+      window.hangUp = async () => {
+        const callDocRef = doc(db, 'web-torrents', webTorrentID);
+        const searchRef = doc(db, 'web-torrents-search', 'Search');
+
+        if (status === 'seeding') {
+            // Delete the call document
+            await deleteDoc(callDocRef);
+
+            // Remove the web torrent from the search array
+            const searchSnapshot = await getDoc(searchRef);
+            if (searchSnapshot.exists()) {
+                const existingData = searchSnapshot.data().webTorrentSearch;
+                const itemToRemove = existingData.find(item => item.id === webTorrentID);
+                if (itemToRemove) {
+                    await updateDoc(searchRef, {
+                        webTorrentSearch: arrayRemove(itemToRemove)
+                    });
+                }
+            }
+
+            showDiv("search");
+
+        } else if (status === 'leeching') {
+            // Clear the answer object from the document
+            await updateDoc(callDocRef, {
+                answer: {}
+            });
+
+            showDiv("search");           
+        }
+
+        // Close data channel and peer connection
+        if (dataChannel) {
+            dataChannel.close();
+        }
+        pc.close();
+        dataChannel = null;
+
+        // Reset messages
+        messages = '[Messages]';
+        document.getElementById('messages').innerText = messages;
+      };
+
+      document.addEventListener('DOMContentLoaded', () => {
+          // Search Input Box
+          document.getElementById('searchInputBox').addEventListener('input', (e) => {
+              searchString = e.target.value;
+          });
+
+          // Message Input Box
+          document.getElementById('messageInputBox').addEventListener('input', (e) => {
+              messageInput = e.target.value;
+          });
+
+          // File Input
+          document.getElementById('fileInput').addEventListener('change', (e) => {
+              file = e.target.files[0];
+              if (file) {
+                  console.log('File selected:', file.name);
+              }
+          });
+
+          // Checkbox Event Listeners
+          const checkboxes = ['all', 'audio', 'video', 'application', 'games', 'other'];
+          checkboxes.forEach((name) => {
+              document.getElementById(`${name}Checkbox`).addEventListener('change', (e) => {
+                  if (e.target.checked) {
+                      checkedOptions[name] = true;
+                  } else {
+                      delete checkedOptions[name];
+                  }
+                  console.log('Checked Options:', checkedOptions);
+              });
+          });
+      });
+    </script>
+    <style>
+      body {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          height: 100vh;
+          background-color: #ffffff;
+      }
+      .coptions {
+        margin-bottom: 15px;
+      }
+      .hidden { 
+        display: none; 
+      } 
+      .visible { 
+        display: block; 
+        text-align: center;
+      }
+
+      .search-box input[type="search"] {
+          width: 80%;
+          padding: 10px;
+          font-size: 16px;
+      }
+
+      .search-box input[type="submit"] {
+          padding: 10px 20px;
+          font-size: 16px;
+          background-color: #343a40;
+          color: white;
+          border: none;
+          cursor: pointer;
+      }
+
+      .search-box input[type="submit"]:hover {
+          background-color: #23272b;
+      }
+
+      footer {
+          margin-top: 20px;
+      }
+
+      .block {
+        position: relative;
+        background: #ffffff;
+      }
+
+      .block:before, .block:after {
+        content: '';
+        position: absolute;
+        left: -2px;
+        top: -2px;
+        background: linear-gradient(45deg, #fb0094, #0000ff, #00ff00,#ffff00, #ff0000, #fb0094, 
+          #0000ff, #00ff00,#ffff00, #ff0000);
+        background-size: 400%;
+        width: calc(100% + 4px);
+        height: calc(100% + 4px);
+        z-index: -1;
+        animation: steam 20s linear infinite;
+      }
+
+      @keyframes steam {
+        0% {
+          background-position: 0 0;
+        }
+        50% {
+          background-position: 400% 0;
+        }
+        100% {
+          background-position: 0 0;
+        }
+      }
+
+      .block:after {
+        filter: blur(50px);
+      }   
+
+      .table-striped tbody tr:nth-of-type(odd) {
+        background-color: #d2e8ff; /* Light blue for odd rows */
+      }
+
+      .table-striped tbody tr:nth-of-type(even) {
+          background-color: #add8e6; /* Blue for even rows */
+      }
+
+      .back-button-container {
+          display: flex;
+          justify-content: flex-start; /* Align to the bottom left */
+          margin-top: 20px;
+      }
+
+      .text-left {
+          text-align: left; /* Align all text to the left */
+      }
+
+      .mobile-result {
+          border: 1px solid #ddd;
+          border-radius: 5px;
+          padding: 10px;
+          margin-bottom: 10px;
+          background-color: #f8f8f8;
+      }
+
+      .mobile-result:hover {
+          background-color: #e8e8e8;
+          cursor: pointer;
+      }
+
+      .back-button-container {
+          margin-top: 20px;
+      }
+
+    </style>
+</head>
+<body>
+  <div>
+    <div class="hidden" id="transfer">
+      <div style="margin-top: 10px" class="coptions">
+        <div id="messages" style="margin-bottom: 10px;">[Messages]</div>
+        <div id="files" style="margin-bottom: 10px;">[Files]</div>
+      </div>
+      <div class="coptions">
+        <input type="text" id="messageInputBox" placeholder="Enter message">
+        <button class="btn btn-dark" onclick="sendMessage()">Send</button>
+        <button class="btn btn-dark" onclick="hangUp()">Leave</button>
+      </div>
+    </div>
+    <div class="visible" id="search">
+      <header>
+          <nav>
+              <section><img src="https://torrindex.net/images/tpb.jpg" alt="Logo"></section>
+              <section>
+                  <strong>Search Torrents</strong>
+                  <a href="javascript:void(0);" onclick="recentWebTorrents()" title="Recent Torrents">Recent&nbsp;Torrents</a> |
+                  <a href="javascript:void(0);" onclick="recentWebTorrents()" title="Recent Torrents">Top&nbsp;100</a> 
+              </section>
+          </nav>
+      </header>
+      <main>     
+        <div class="input-group mb-3 d-flex justify-content-center" style="align-items: center; margin-top: 10px;">
+          <input type="text" id="searchInputBox" class="form-control" placeholder="Search" value="Pirates of the Caribean" style="max-width: 200px; margin-left: 10px;">
+          <button class="btn btn-primary" style="margin-left: 10px;" onclick="searchWebTorrents()">Search</button>
+        </div>   
+        <div class="coptions">
+            <label><input type="checkbox" id="allCheckbox" checked> All</label>
+            <label><input type="checkbox" id="audioCheckbox"> Audio</label>
+            <label><input type="checkbox" id="videoCheckbox"> Video</label>
+            <label><input type="checkbox" id="applicationCheckbox"> Application</label>
+            <label><input type="checkbox" id="gamesCheckbox"> Games</label>
+            <label><input type="checkbox" id="otherCheckbox"> Other</label>
+        </div>
+        <a href="javascript:void(0);" onclick="showDiv('upload')" title="Upload Web Torrent">Upload Web Torrent</a>
+      </main>    
+    </div>
+    <div class="hidden" id="results">
+    </div>
+    <div class="hidden block" id="upload">
+      <div class="card p-4 text-left" style="padding: 10px">
+          <div class="form-group">
+              <label for="nameInput">Name</label>
+              <input type="text" class="form-control" id="nameInput" placeholder="Enter name" required>
+          </div>
+          <div class="form-group">
+              <label for="categoryDropdown">Category</label>
+              <select class="form-control" id="categoryDropdown" required>
+                  <option value="audio">Audio</option>
+                  <option value="video">Video</option>
+                  <option value="application">Application</option>
+                  <option value="games">Games</option>
+                  <option value="other">Other</option>
+              </select>
+          </div>
+          <div class="form-group">
+              <label for="fileInput">File</label>
+              <input type="file" class="form-control-file" id="fileInput" required>
+          </div>
+          <button class="btn btn-dark" onclick="SeedWebTorrent()">Upload Web Torrent</button>
+      </div>
+      <a href="javascript:void(0);" style="padding: 30px; display: inline-block; color: inherit; text-align: left;" onclick="showDiv('search')">Back</a>
+    </div>  
+  </div>
+</body>
+</html>
